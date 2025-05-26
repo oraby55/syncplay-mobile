@@ -1,49 +1,97 @@
 name: Build iOS IPA
 
-on: 
-  workflow_dispatch: 
+on:
+  workflow_dispatch: # Allows you to trigger the build manually from the Actions tab
+  push:
+    branches:
+      - main # Or whatever your default branch is
 
-jobs: 
-  build:
-    runs-on: macos-latest
+jobs:
+  build_ipa:
+    name: Build iOS IPA
+    runs-on: macos-latest # iOS builds require macOS environment
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v3
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Make gradlew executable
-      run: chmod +x ./gradlew
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17' # Common for modern KMM projects, adjust if needed
 
-    - name: Generate Kotlin framework
-      run: ./gradlew :shared:generateDummyFramework
+      - name: Validate Gradle wrapper
+        uses: gradle/wrapper-validation-action@v1
 
-    - name: Install CocoaPods
-      run: |
-        cd iosApp
-        pod install
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
 
-    - name: Build IPA (code signing disabled)
-      run: |
-        xcodebuild -workspace iosApp/iosApp.xcworkspace \
-                   -scheme iosApp \
-                   -sdk iphoneos \
-                   -configuration Release \
-                   -archivePath $PWD/build/iosApp.xcarchive \
-                   archive \
-                   CODE_SIGNING_ALLOWED=NO \
-                   CODE_SIGNING_REQUIRED=NO \
-                   CODE_SIGN_IDENTITY=""
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
 
-        xcodebuild -exportArchive \
-                   -archivePath $PWD/build/iosApp.xcarchive \
-                   -exportPath $PWD/build/ipa \
-                   -exportOptionsPlist iosApp/ExportOptions.plist \
-                   CODE_SIGNING_ALLOWED=NO \
-                   CODE_SIGNING_REQUIRED=NO \
-                   CODE_SIGN_IDENTITY=""
+      - name: Build iOS Application Bundle (.app)
+        run: |
+          # This is the crucial step. The exact Gradle task to build the .app bundle for release on a device might vary.
+          # Common KMM tasks are :iosApp:build, :iosApp:assembleReleaseIosArm64, or similar.
+          # We pass -Pconfiguration=Release and -PiosArch=arm64 as common properties, but the project might use different names or tasks.
+          # Add --stacktrace or --info for more detailed logs if it fails.
+          echo "Attempting to build the iOS app..."
+          ./gradlew :iosApp:build -Pconfiguration=Release -PiosArch=arm64 --info || \
+          (echo "First build attempt failed. Trying another common task: :iosApp:assembleReleaseIOS" && \
+           ./gradlew :iosApp:assembleReleaseIOS --info) || \
+          (echo "Second build attempt failed. Trying a more generic :iosApp:build" && \
+           ./gradlew :iosApp:build --info) || \
+           (echo "All common build tasks failed. Please check the project's build.gradle.kts for the correct iOS build task." && exit 1)
 
-    - name: Upload IPA
-      uses: actions/upload-artifact@v4
-      with:
-        name: iosApp.ipa
-        path: build/ipa
+          # The .app bundle path depends on the project structure and build output.
+          # Common locations for KMM projects:
+          # iosApp/build/bin/iosArm64/releaseExecutable/YourApp.app
+          # iosApp/build/ios/Release-iphoneos/YourApp.app
+          # iosApp/build/DerivedData/Build/Products/Release-iphoneos/YourApp.app
+          # Replace 'YourApp.app' with the actual application name (likely 'iosApp.app' or 'SyncplayMobile.app')
+          # This find command tries to locate it.
+          echo "Searching for .app bundle..."
+          APP_PATH=$(find $GITHUB_WORKSPACE/iosApp/build -name "*.app" -path "*Release-iphoneos*" -print -quit 2>/dev/null || \
+                     find $GITHUB_WORKSPACE/iosApp/build/bin -name "*.app" -path "*iosArm64/releaseExecutable*" -print -quit 2>/dev/null || \
+                     find $GITHUB_WORKSPACE/iosApp/DerivedData -name "*.app" -path "*Release-iphoneos*" -print -quit 2>/dev/null)
+
+          if [ -z "$APP_PATH" ] || [ ! -d "$APP_PATH" ]; then
+            echo "Error: .app bundle not found after build."
+            echo "Listing contents of likely build directories to help debug:"
+            ls -R $GITHUB_WORKSPACE/iosApp/build || true
+            exit 1
+          fi
+          echo "Found .app bundle at: $APP_PATH"
+          # Set APP_PATH for subsequent steps
+          echo "APP_PATH=$APP_PATH" >> $GITHUB_ENV
+
+      - name: Create IPA file
+        run: |
+          if [ -z "${{ env.APP_PATH }}" ] || [ ! -d "${{ env.APP_PATH }}" ]; then
+            echo "Error: APP_PATH environment variable is not set or invalid."
+            exit 1
+          fi
+          echo "Packaging .app from: ${{ env.APP_PATH }}"
+          
+          APP_BASENAME=$(basename "${{ env.APP_PATH }}")
+          APP_NAME_NO_EXT="${APP_BASENAME%.app}"
+          
+          IPA_DIR="$GITHUB_WORKSPACE/ipa_output"
+          mkdir -p "$IPA_DIR/Payload"
+          cp -R "${{ env.APP_PATH }}" "$IPA_DIR/Payload/"
+          
+          echo "Creating ${APP_NAME_NO_EXT}.ipa in $IPA_DIR"
+          cd "$IPA_DIR"
+          zip -r "${APP_NAME_NO_EXT}.ipa" "Payload"
+          cd "$GITHUB_WORKSPACE"
+          
+          echo "IPA_PATH=$IPA_DIR/${APP_NAME_NO_EXT}.ipa" >> $GITHUB_ENV
+          echo "IPA created at: $IPA_DIR/${APP_NAME_NO_EXT}.ipa"
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: syncplay-mobile-ipa
+          path: ${{ env.IPA_PATH }}
+          if-no-files-found: error
