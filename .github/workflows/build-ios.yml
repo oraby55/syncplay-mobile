@@ -18,10 +18,11 @@ jobs:
       - name: Set up Ruby for CocoaPods
         uses: ruby/setup-ruby@v1
         with:
-          ruby-version: '2.7' # Or a version compatible with CocoaPods used by the project
+          ruby-version: '3.1' # <--- UPDATED THIS LINE (was '2.7')
 
       - name: Install CocoaPods
         run: gem install cocoapods
+
 
       # KMM projects often have the shared module built by Gradle and linked.
       # Xcode might be configured to run this, or we might need to do it explicitly.
