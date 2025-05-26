@@ -11,6 +11,9 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v3
 
+    - name: Make gradlew executable
+      run: chmod +x ./gradlew
+
     - name: Generate Kotlin framework
       run: ./gradlew :shared:generateDummyFramework
 
@@ -19,18 +22,25 @@ jobs:
         cd iosApp
         pod install
 
-    - name: Build IPA
+    - name: Build IPA (code signing disabled)
       run: |
         xcodebuild -workspace iosApp/iosApp.xcworkspace \
                    -scheme iosApp \
                    -sdk iphoneos \
                    -configuration Release \
-                   -archivePath $PWD/build/iosApp.xcarchive archive
+                   -archivePath $PWD/build/iosApp.xcarchive \
+                   archive \
+                   CODE_SIGNING_ALLOWED=NO \
+                   CODE_SIGNING_REQUIRED=NO \
+                   CODE_SIGN_IDENTITY=""
 
         xcodebuild -exportArchive \
                    -archivePath $PWD/build/iosApp.xcarchive \
                    -exportPath $PWD/build/ipa \
-                   -exportOptionsPlist iosApp/ExportOptions.plist
+                   -exportOptionsPlist iosApp/ExportOptions.plist \
+                   CODE_SIGNING_ALLOWED=NO \
+                   CODE_SIGNING_REQUIRED=NO \
+                   CODE_SIGN_IDENTITY=""
 
     - name: Upload IPA
       uses: actions/upload-artifact@v4
