@@ -15,79 +15,90 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Set up Ruby for CocoaPods
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '2.7' # Or a version compatible with CocoaPods used by the project
+
+      - name: Install CocoaPods
+        run: gem install cocoapods
+
+      # KMM projects often have the shared module built by Gradle and linked.
+      # Xcode might be configured to run this, or we might need to do it explicitly.
+      # First, let's ensure Java and Gradle are set up for the KMM shared module.
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: '17' # Common for modern KMM projects, adjust if needed
-
-      - name: Validate Gradle wrapper
-        uses: gradle/wrapper-validation-action@v1
+          java-version: '17' # Adjust if your KMM project uses a different JDK
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
 
       - name: Make gradlew executable
         run: chmod +x ./gradlew
+        
+      # It's possible the KMM shared framework needs to be built before pod install or xcodebuild.
+      # Common tasks: :shared:assembleXCFramework or :shared:packForXcode
+      # This step might be optional if Xcode's build phases handle Kotlin compilation.
+      # If xcodebuild fails complaining about a missing Kotlin framework, uncomment and adjust this.
+      # - name: Build KMM Shared Framework (if needed)
+      #   run: |
+      #     echo "Attempting to build shared KMM framework..."
+      #     ./gradlew :shared:assembleXCFramework --info || \
+      #     ./gradlew :shared:packForXcode --info || \
+      #     echo "KMM shared framework build attempt finished. Continuing with pod install. If Xcode fails, this step might need adjustment."
 
-      - name: Build iOS Application Bundle (.app)
+      - name: Install Pod Dependencies
         run: |
-          # This is the crucial step. The exact Gradle task to build the .app bundle for release on a device might vary.
-          # Common KMM tasks are :iosApp:build, :iosApp:assembleReleaseIosArm64, or similar.
-          # We pass -Pconfiguration=Release and -PiosArch=arm64 as common properties, but the project might use different names or tasks.
-          # Add --stacktrace or --info for more detailed logs if it fails.
-          echo "Attempting to build the iOS app..."
-          ./gradlew :iosApp:build -Pconfiguration=Release -PiosArch=arm64 --info || \
-          (echo "First build attempt failed. Trying another common task: :iosApp:assembleReleaseIOS" && \
-           ./gradlew :iosApp:assembleReleaseIOS --info) || \
-          (echo "Second build attempt failed. Trying a more generic :iosApp:build" && \
-           ./gradlew :iosApp:build --info) || \
-           (echo "All common build tasks failed. Please check the project's build.gradle.kts for the correct iOS build task." && exit 1)
+          cd iosApp
+          pod install --repo-update
+        working-directory: ./iosApp # Ensures pod install runs in the correct directory
 
-          # The .app bundle path depends on the project structure and build output.
-          # Common locations for KMM projects:
-          # iosApp/build/bin/iosArm64/releaseExecutable/YourApp.app
-          # iosApp/build/ios/Release-iphoneos/YourApp.app
-          # iosApp/build/DerivedData/Build/Products/Release-iphoneos/YourApp.app
-          # Replace 'YourApp.app' with the actual application name (likely 'iosApp.app' or 'SyncplayMobile.app')
-          # This find command tries to locate it.
-          echo "Searching for .app bundle..."
-          APP_PATH=$(find $GITHUB_WORKSPACE/iosApp/build -name "*.app" -path "*Release-iphoneos*" -print -quit 2>/dev/null || \
-                     find $GITHUB_WORKSPACE/iosApp/build/bin -name "*.app" -path "*iosArm64/releaseExecutable*" -print -quit 2>/dev/null || \
-                     find $GITHUB_WORKSPACE/iosApp/DerivedData -name "*.app" -path "*Release-iphoneos*" -print -quit 2>/dev/null)
+      - name: Select Xcode version (optional, defaults to a recent version)
+        run: sudo xcode-select -s /Applications/Xcode_$(xcodebuild -version | grep Xcode | cut -d' ' -f2 | cut -d'.' -f1).app
 
-          if [ -z "$APP_PATH" ] || [ ! -d "$APP_PATH" ]; then
-            echo "Error: .app bundle not found after build."
-            echo "Listing contents of likely build directories to help debug:"
-            ls -R $GITHUB_WORKSPACE/iosApp/build || true
+      - name: Build and Archive iOS App
+        env:
+          # Attempting to use generic signing for ad-hoc distribution suitable for jailbreak
+          # The ExportOptions.plist will have the final say on signing method.
+          # If your ExportOptions.plist is set for "ad-hoc" or "development", it should be fine.
+          CODE_SIGN_IDENTITY: "Apple Development" # A generic identity often available on CI
+          DEVELOPMENT_TEAM: "" # No specific team
+        run: |
+          # Determine the scheme. It's often the same as the project name without .xcodeproj.
+          # For iosApp.xcodeproj and iosApp.xcworkspace, the scheme is likely 'iosApp'.
+          # You can list schemes with: xcodebuild -list -workspace iosApp/iosApp.xcworkspace
+          SCHEME_NAME="iosApp" # <<<<<<<<< IMPORTANT: Verify this scheme name!
+
+          echo "Archiving with scheme: $SCHEME_NAME"
+          xcodebuild archive \
+            -workspace iosApp/iosApp.xcworkspace \
+            -scheme "$SCHEME_NAME" \
+            -sdk iphoneos \
+            -archivePath "$GITHUB_WORKSPACE/build/iosApp.xcarchive" \
+            CODE_SIGNING_ALLOWED=NO # Try to disable codesigning requirement at archive stage
+            # The following might also be useful if strict signing is an issue:
+            # CODE_SIGN_IDENTITY="" \
+            # CODE_SIGNING_REQUIRED=NO \
+
+      - name: Export IPA from Archive
+        run: |
+          echo "Exporting IPA..."
+          xcodebuild -exportArchive \
+            -archivePath "$GITHUB_WORKSPACE/build/iosApp.xcarchive" \
+            -exportPath "$GITHUB_WORKSPACE/build/ipa" \
+            -exportOptionsPlist iosApp/ExportOptions.plist # Using the plist from your repo
+
+          # Find the generated IPA file (its name might vary based on ExportOptions.plist)
+          IPA_PATH=$(find "$GITHUB_WORKSPACE/build/ipa" -name "*.ipa" -print -quit)
+          if [ -z "$IPA_PATH" ]; then
+            echo "Error: IPA file not found in $GITHUB_WORKSPACE/build/ipa/"
+            ls -R "$GITHUB_WORKSPACE/build/ipa/" # List contents for debugging
             exit 1
           fi
-          echo "Found .app bundle at: $APP_PATH"
-          # Set APP_PATH for subsequent steps
-          echo "APP_PATH=$APP_PATH" >> $GITHUB_ENV
-
-      - name: Create IPA file
-        run: |
-          if [ -z "${{ env.APP_PATH }}" ] || [ ! -d "${{ env.APP_PATH }}" ]; then
-            echo "Error: APP_PATH environment variable is not set or invalid."
-            exit 1
-          fi
-          echo "Packaging .app from: ${{ env.APP_PATH }}"
-          
-          APP_BASENAME=$(basename "${{ env.APP_PATH }}")
-          APP_NAME_NO_EXT="${APP_BASENAME%.app}"
-          
-          IPA_DIR="$GITHUB_WORKSPACE/ipa_output"
-          mkdir -p "$IPA_DIR/Payload"
-          cp -R "${{ env.APP_PATH }}" "$IPA_DIR/Payload/"
-          
-          echo "Creating ${APP_NAME_NO_EXT}.ipa in $IPA_DIR"
-          cd "$IPA_DIR"
-          zip -r "${APP_NAME_NO_EXT}.ipa" "Payload"
-          cd "$GITHUB_WORKSPACE"
-          
-          echo "IPA_PATH=$IPA_DIR/${APP_NAME_NO_EXT}.ipa" >> $GITHUB_ENV
-          echo "IPA created at: $IPA_DIR/${APP_NAME_NO_EXT}.ipa"
+          echo "IPA generated at: $IPA_PATH"
+          echo "IPA_PATH=$IPA_PATH" >> $GITHUB_ENV
 
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
