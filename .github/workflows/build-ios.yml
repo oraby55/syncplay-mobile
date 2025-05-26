@@ -1,15 +1,18 @@
 name: Build iOS IPA
 
-on:
-  workflow_dispatch:
+on: 
+  workflow_dispatch: 
 
-jobs:
+jobs: 
   build:
     runs-on: macos-latest
 
     steps:
     - name: Checkout code
       uses: actions/checkout@v3
+
+    - name: Generate Kotlin framework
+      run: ./gradlew :shared:generateDummyFramework
 
     - name: Install CocoaPods
       run: |
